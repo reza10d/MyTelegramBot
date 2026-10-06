@@ -4558,8 +4558,6 @@ def format_emoji_premium_panel(user_id: int) -> str:
         "`.حذف لیست ایموجی پرمیوم`\n"
         "`.ایموجی پرمیوم روشن`\n"
         "`.ایموجی پرمیوم خاموش`\n\n"
-        "هلپر اینلاین: @helperselfMR01_bot\n"
-        "در BotFather برای هلپر: Inline Mode روشن + Inline Feedback = 100%"
     )
 
 def convert_normal_emoji_to_premium_entities(text: str, user_id: int):
