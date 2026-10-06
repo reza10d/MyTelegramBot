@@ -3162,6 +3162,14 @@ def load_all_states():
             _pm = settings.get("pemoji_map") or {}
             if isinstance(_pm, dict):
                 PEMOJI_MAP[user_id] = {str(k): str(v) for k, v in _pm.items()}
+                # همگام با EMOJI_CHAR_TO_PREMIUM
+                bucket = dict(EMOJI_CHAR_TO_PREMIUM.get(user_id) or {})
+                for k, v in _pm.items():
+                    try:
+                        bucket[str(k)] = int(v)
+                    except Exception:
+                        pass
+                EMOJI_CHAR_TO_PREMIUM[user_id] = bucket
             PEMOJI_STATUS[user_id] = bool(settings.get("pemoji_status", EMOJI_PREMIUM_CONVERT.get(user_id, False)))
             ecm = settings.get("emoji_char_map") or {}
             if isinstance(ecm, dict):
@@ -3264,6 +3272,14 @@ def apply_user_settings_from_db(user_id: int):
             _pm = settings.get("pemoji_map") or {}
             if isinstance(_pm, dict):
                 PEMOJI_MAP[user_id] = {str(k): str(v) for k, v in _pm.items()}
+                # همگام با EMOJI_CHAR_TO_PREMIUM
+                bucket = dict(EMOJI_CHAR_TO_PREMIUM.get(user_id) or {})
+                for k, v in _pm.items():
+                    try:
+                        bucket[str(k)] = int(v)
+                    except Exception:
+                        pass
+                EMOJI_CHAR_TO_PREMIUM[user_id] = bucket
             PEMOJI_STATUS[user_id] = bool(settings.get("pemoji_status", EMOJI_PREMIUM_CONVERT.get(user_id, False)))
             ecm = settings.get("emoji_char_map") or {}
             if isinstance(ecm, dict):
@@ -4517,24 +4533,43 @@ MAX_PREMIUM_EMOJI_SLOTS = 5
 
 
 def _emoji_map_for_user(user_id: int) -> dict:
-    """پک thehornyclubemojis + حروف + ثبت‌شده کاربر (اولویت با کاربر)"""
+    """همه نگاشت‌های کاربر + پک‌ها (اولویت با ثبت کاربر)"""
     m = {}
     try:
-        for k, v in PACK_EMOJI_CACHE.items():
+        for k, v in (PACK_EMOJI_CACHE or {}).items():
             m[str(k)] = int(v)
     except Exception:
         pass
     try:
-        for k, v in PREMIUM_LETTER_MAP.items():
+        for k, v in (PREMIUM_LETTER_MAP or {}).items():
             m[str(k)] = int(v)
     except Exception:
         pass
-    custom = EMOJI_CHAR_TO_PREMIUM.get(user_id) or {}
-    for k, v in custom.items():
-        try:
-            m[str(k)] = int(v)
-        except Exception:
-            pass
+    # نگاشت‌های ذخیره‌شده کاربر از چند منبع
+    sources = []
+    try:
+        sources.append(EMOJI_CHAR_TO_PREMIUM.get(user_id) or {})
+    except Exception:
+        pass
+    try:
+        sources.append(PEMOJI_MAP.get(user_id) or {})
+    except Exception:
+        pass
+    try:
+        sources.append(EMOJI_PREMIUM_TEMPLATES.get(user_id) or {})
+    except Exception:
+        pass
+    for custom in sources:
+        if not isinstance(custom, dict):
+            continue
+        for k, v in custom.items():
+            try:
+                m[str(k)] = int(v)
+            except Exception:
+                try:
+                    m[str(k)] = int(str(v).strip())
+                except Exception:
+                    pass
     return m
 
 
@@ -4558,6 +4593,8 @@ def format_emoji_premium_panel(user_id: int) -> str:
         "`.حذف لیست ایموجی پرمیوم`\n"
         "`.ایموجی پرمیوم روشن`\n"
         "`.ایموجی پرمیوم خاموش`\n\n"
+        "هلپر اینلاین: @helperselfMR01_bot\n"
+        "در BotFather برای هلپر: Inline Mode روشن + Inline Feedback = 100%"
     )
 
 def convert_normal_emoji_to_premium_entities(text: str, user_id: int):
@@ -8284,16 +8321,23 @@ async def pemoji_ds_controller(client, message) -> bool:
             pmap[ch] = str(doc)
             done.append(ch)
         PEMOJI_MAP[uid] = pmap
-        # سازگاری با سیستم قبلی
+        # سازگاری با همه سیستم‌های قبلی
         try:
             tmap = EMOJI_PREMIUM_TEMPLATES.get(uid) or {}
+            bucket = dict(EMOJI_CHAR_TO_PREMIUM.get(uid) or {})
             for ch in done:
                 tmap[ch] = pmap[ch]
+                try:
+                    bucket[ch] = int(pmap[ch])
+                except Exception:
+                    bucket[ch] = pmap[ch]
             EMOJI_PREMIUM_TEMPLATES[uid] = tmap
+            EMOJI_CHAR_TO_PREMIUM[uid] = bucket
             EMOJI_PREMIUM_CONVERT[uid] = True
             PEMOJI_STATUS[uid] = True
-        except Exception:
-            pass
+            logging.info("pemoji saved uid=%s keys=%s", uid, list(bucket.keys()))
+        except Exception as e:
+            logging.warning("pemoji save compat: %s", e)
         try:
             persist_all_user_settings(uid)
         except Exception:
