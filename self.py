@@ -90,7 +90,7 @@ GEMINI_IMAGE_MODELS = [
 ]
 
 # اینلاین هلپر ایموجی پریمیوم (بات ساخته‌شده با اکانت پریمیوم)
-HELPER_INLINE_BOT = os.environ.get("HELPER_INLINE_BOT", "SelfmrhelPerbot").strip().lstrip("@")
+HELPER_INLINE_BOT = os.environ.get("HELPER_INLINE_BOT", "helperselfMR01_bot").strip().lstrip("@")
 # توکن بات پریمیوم برای اینلاین ایموجی (مثل darkself) — از سرور
 PREMIUM_BOT_TOKEN = (os.environ.get("PREMIUM_BOT_TOKEN") or os.environ.get("HELPER_BOT_TOKEN") or "").strip()
 
@@ -4539,11 +4539,27 @@ def _emoji_map_for_user(user_id: int) -> dict:
 
 
 def format_emoji_premium_panel(user_id: int) -> str:
+    on = bool(EMOJI_PREMIUM_CONVERT.get(user_id, False) or PEMOJI_STATUS.get(user_id, False))
+    pmap = {}
+    try:
+        pmap = PEMOJI_MAP.get(user_id) or EMOJI_PREMIUM_TEMPLATES.get(user_id) or {}
+    except Exception:
+        pmap = {}
+    n = len(pmap) if isinstance(pmap, dict) else 0
+    st = "🟢 روشن" if on else "🔴 خاموش"
     return (
         "⭐ ایموجی پریمیوم | self MR\n\n"
-        "🔧 در دست تعمیر\n\n"
-        "این بخش موقتاً غیرفعال است.\n"
-        "به‌زودی برمی‌گردد."
+        f"وضعیت تبدیل خودکار: {st}\n"
+        f"تعداد نگاشت: {n}\n\n"
+        "دستورات:\n"
+        "`.تنظیم ایموجی ❤️` + ریپلای روی ایموجی پرمیوم\n"
+        "`.لیست ایموجی پرمیوم`\n"
+        "`.حذف ایموجی 1` یا `.حذف ایموجی ❤️`\n"
+        "`.حذف لیست ایموجی پرمیوم`\n"
+        "`.ایموجی پرمیوم روشن`\n"
+        "`.ایموجی پرمیوم خاموش`\n\n"
+        "هلپر اینلاین: @helperselfMR01_bot\n"
+        "در BotFather برای هلپر: Inline Mode روشن + Inline Feedback = 100%"
     )
 
 def convert_normal_emoji_to_premium_entities(text: str, user_id: int):
@@ -8404,15 +8420,6 @@ async def reply_based_controller(client, message):
 
     # ========== وضعیت سلف روشن/خاموش ==========
 
-    if cmd in (".پینگ", "پینگ", ".ping", "ping"):
-        try:
-            t0 = time.time()
-            await message.edit_text("⏳ ...")
-            ms = int((time.time() - t0) * 1000)
-            await message.edit_text(f"🏓 پینگ: `{ms}ms` | self MR")
-        except Exception:
-            pass
-        return
 
     if cmd in (".سلف روشن", "سلف روشن"):
         SELF_STATUS[user_id] = True
@@ -11684,7 +11691,6 @@ def build_panel_keyboard(user_id, page=1):
             ],
             [
                 _styled_btn("⭐ عکس استارزی", f"panel_page_63_{user_id}", style="primary"),
-                _styled_btn("✨ ایموجی پرمیوم", f"panel_page_64_{user_id}", style="primary"),
             ],
             [
                 _styled_btn("⬅️ بستن پنل", f"close_panel_{user_id}", style="danger"),
@@ -11870,7 +11876,7 @@ def build_panel_keyboard(user_id, page=1):
         ]
 
     if page == 40:
-        on = EMOJI_PREMIUM_CONVERT.get(user_id, False)
+        on = bool(EMOJI_PREMIUM_CONVERT.get(user_id, False) or PEMOJI_STATUS.get(user_id, False))
         return [
             [_styled_btn(f"وضعیت: ({'on ✓' if on else 'off ✗'})", f"toggle_emoji_convert_{user_id}", on)],
             [_styled_btn("🗑 پاکسازی لیست ایموجی", f"clear_emoji_map_{user_id}", style="danger")],
@@ -13929,12 +13935,14 @@ async def _callback_panel_handler_impl(client, callback, data: str):
             return
 
         elif action == "toggle_emoji_convert":
-            EMOJI_PREMIUM_CONVERT[target_user_id] = not EMOJI_PREMIUM_CONVERT.get(target_user_id, False)
+            new_st = not bool(EMOJI_PREMIUM_CONVERT.get(target_user_id, False) or PEMOJI_STATUS.get(target_user_id, False))
+            EMOJI_PREMIUM_CONVERT[target_user_id] = new_st
+            PEMOJI_STATUS[target_user_id] = new_st
             try:
                 persist_all_user_settings(target_user_id)
             except Exception:
                 pass
-            st = "on ✓" if EMOJI_PREMIUM_CONVERT[target_user_id] else "off ✗"
+            st = "on ✓" if new_st else "off ✗"
             await callback.answer(f"وضعیت: {st}")
             try:
                 help_text = format_emoji_premium_panel(target_user_id)
@@ -13951,7 +13959,18 @@ async def _callback_panel_handler_impl(client, callback, data: str):
             return
 
         elif action == "clear_emoji_map":
-            EMOJI_CHAR_TO_PREMIUM[target_user_id] = {}
+            try:
+                EMOJI_CHAR_TO_PREMIUM[target_user_id] = {}
+            except Exception:
+                pass
+            try:
+                PEMOJI_MAP[target_user_id] = {}
+            except Exception:
+                pass
+            try:
+                EMOJI_PREMIUM_TEMPLATES[target_user_id] = {}
+            except Exception:
+                pass
             try:
                 persist_all_user_settings(target_user_id)
             except Exception:
@@ -14271,8 +14290,14 @@ async def _callback_panel_handler_impl(client, callback, data: str):
                 ),
                                 40: (
                     "⭐ ایموجی پریمیوم | self MR\n\n"
-                    "🔧 در دست تعمیر\n\n"
-                    "این بخش موقتاً غیرفعال است."
+                    "دستورات:\n"
+                    "`.تنظیم ایموجی ❤️` + ریپلای روی ایموجی پرمیوم\n"
+                    "`.لیست ایموجی پرمیوم`\n"
+                    "`.حذف ایموجی 1` یا `.حذف ایموجی ❤️`\n"
+                    "`.حذف لیست ایموجی پرمیوم`\n"
+                    "`.ایموجی پرمیوم روشن` / `.ایموجی پرمیوم خاموش`\n\n"
+                    "هلپر: @helperselfMR01_bot\n"
+                    "BotFather → Inline Feedback = 100%"
                 ),
                 41: (
                     "📩 منشی آفلاین | self MR\n\n"
@@ -17235,7 +17260,7 @@ async def hourly_diamond_deduction_task():
 
 async def helper_start_handler(client, message):
     """استارت هلپر — مثل pyiuebot"""
-    uname = (HELPER_INLINE_BOT or "SelfmrhelPerbot").lstrip("@")
+    uname = (HELPER_INLINE_BOT or "helperselfMR01_bot").lstrip("@")
     text = (
         f"👑 به ربات تبدیل ایموجی پریمیوم خوش آمدید\n\n"
         f"تعداد کانال‌های ثبت شده شما: 0\n\n"
@@ -17288,7 +17313,7 @@ async def helper_premium_message_handler(client, message):
         if not message or not message.from_user:
             return
         text = (message.text or message.caption or "").strip()
-        uname = (HELPER_INLINE_BOT or "SelfmrhelPerbot").lstrip("@")
+        uname = (HELPER_INLINE_BOT or "helperselfMR01_bot").lstrip("@")
 
         if text in ("/list", "list", "لیست"):
             items = list(MANAGER_PREMIUM_EMOJIS.values())
