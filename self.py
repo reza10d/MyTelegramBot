@@ -4593,8 +4593,6 @@ def format_emoji_premium_panel(user_id: int) -> str:
         "`.حذف لیست ایموجی پرمیوم`\n"
         "`.ایموجی پرمیوم روشن`\n"
         "`.ایموجی پرمیوم خاموش`\n\n"
-        "هلپر اینلاین: @helperselfMR01_bot\n"
-        "در BotFather برای هلپر: Inline Mode روشن + Inline Feedback = 100%"
     )
 
 def convert_normal_emoji_to_premium_entities(text: str, user_id: int):
@@ -8413,22 +8411,29 @@ async def pemoji_ds_outgoing(client, message):
             return
         except Exception as e1:
             logging.debug("pemoji entity: %s", e1)
-        # 2) inline از هلپر/منیجر
-        bot_un = HELPER_INLINE_BOT or ""
+        # 2) inline مثل darkself — چند کوئری امتحان می‌شود
+        bot_un = (HELPER_INLINE_BOT or "helperselfMR01_bot").lstrip("@")
         try:
-            if manager_bot and getattr(manager_bot, "me", None) and manager_bot.me.username:
-                if not bot_un:
-                    bot_un = manager_bot.me.username
+            if (not bot_un) and manager_bot and getattr(manager_bot, "me", None) and manager_bot.me.username:
+                bot_un = manager_bot.me.username.lstrip("@")
         except Exception:
             pass
         if bot_un:
-            try:
-                results = await asyncio.wait_for(
-                    client.get_inline_bot_results(bot_un, f"pe|{uid}|{cid}|{key}"),
-                    timeout=6.0,
-                )
-                if results and results.results:
-                    reply_id = message.reply_to_message_id
+            reply_id = getattr(message, "reply_to_message_id", None)
+            queries = [
+                text,  # خود متن/ایموجی (روش darkself)
+                f"pe|{uid}|{cid}|{key}",
+                f"pe|{uid}|i|0",
+                f"pe|{uid}|{key.encode('utf-8').hex()}",
+            ]
+            for qtry in queries:
+                try:
+                    results = await asyncio.wait_for(
+                        client.get_inline_bot_results(bot_un, qtry),
+                        timeout=6.0,
+                    )
+                    if not results or not getattr(results, "results", None):
+                        continue
                     try:
                         await message.delete()
                     except Exception:
@@ -8439,10 +8444,10 @@ async def pemoji_ds_outgoing(client, message):
                         results.results[0].id,
                         reply_to_message_id=reply_id,
                     )
-                    logging.info("pemoji inline ok uid=%s bot=%s", uid, bot_un)
+                    logging.info("pemoji INLINE ok uid=%s bot=%s q=%r", uid, bot_un, qtry[:40])
                     return
-            except Exception as e2:
-                logging.debug("pemoji inline: %s", e2)
+                except Exception as e2:
+                    logging.debug("pemoji inline try %r: %s", str(qtry)[:30], e2)
     except Exception as e:
         logging.debug("pemoji_ds_outgoing: %s", e)
 
@@ -12018,6 +12023,82 @@ async def inline_panel_handler(client, query):
     # ===== ایموجی پریمیوم از طریق اینلاین =====
     # فرمت‌ها: pe|uid|hex  یا  pe|uid|i|slot  یا  pe:uid:hex
 
+    # --- darkself-style: کوئری = خود ایموجی/متن نگاشت‌شده ---
+    try:
+        mapping = _emoji_map_for_user(user_id)
+        if mapping and q and not q.startswith("pe|") and not q.startswith("pe:") and "[" not in q:
+            matched_key = None
+            matched_cid = None
+            # متن دقیقاً برابر کلید
+            if q in mapping:
+                matched_key, matched_cid = q, int(mapping[q])
+            else:
+                for k, v in sorted(mapping.items(), key=lambda x: -len(str(x[0]))):
+                    if k and k in q and len(q) <= len(k) + 4:
+                        matched_key, matched_cid = k, int(v)
+                        break
+            if matched_cid:
+                ph = matched_key if matched_key else "⭐"
+                # Bot API با entity واقعی
+                _tok = (HELPER_BOT_TOKEN if (HELPER_BOT_ENABLED and HELPER_BOT_TOKEN) else BOT_TOKEN) or BOT_TOKEN
+                utf16_len = max(1, len(ph.encode("utf-16-le")) // 2)
+                payload = {
+                    "inline_query_id": query.id,
+                    "cache_time": 0,
+                    "is_personal": True,
+                    "results": [{
+                        "type": "article",
+                        "id": f"pe{user_id}{matched_cid}"[:64],
+                        "title": f"✦ {ph}",
+                        "description": "ارسال ایموجی پرمیوم",
+                        "input_message_content": {
+                            "message_text": ph,
+                            "entities": [{
+                                "type": "custom_emoji",
+                                "offset": 0,
+                                "length": utf16_len,
+                                "custom_emoji_id": str(matched_cid),
+                            }],
+                        },
+                    }],
+                }
+                try:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(
+                            f"https://api.telegram.org/bot{_tok}/answerInlineQuery",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=6),
+                        ) as resp:
+                            data = await resp.json()
+                            if data.get("ok"):
+                                logging.info("inline plain-emoji ok uid=%s key=%r cid=%s", user_id, ph, matched_cid)
+                                return
+                            logging.warning("inline plain-emoji api: %s", data)
+                except Exception as e:
+                    logging.warning("inline plain-emoji: %s", e)
+                # fallback pyrogram
+                try:
+                    from pyrogram.enums import MessageEntityType as _MET
+                    ents = [MessageEntity(type=_MET.CUSTOM_EMOJI, offset=0, length=utf16_len, custom_emoji_id=int(matched_cid))]
+                    await query.answer(
+                        results=[
+                            InlineQueryResultArticle(
+                                id=f"pe{user_id}{matched_cid}"[:64],
+                                title=f"✦ {ph}",
+                                description="ارسال ایموجی پرمیوم",
+                                input_message_content=InputTextMessageContent(ph),
+                            )
+                        ],
+                        cache_time=0,
+                        is_personal=True,
+                    )
+                    return
+                except Exception as e2:
+                    logging.warning("inline plain-emoji pyro: %s", e2)
+    except Exception as e:
+        logging.warning("inline plain map: %s", e)
+
+
     
     
     # --- تبدیل مثل pyiuebot: متن [کد] متن ---
@@ -14338,8 +14419,6 @@ async def _callback_panel_handler_impl(client, callback, data: str):
                     "`.حذف ایموجی 1` یا `.حذف ایموجی ❤️`\n"
                     "`.حذف لیست ایموجی پرمیوم`\n"
                     "`.ایموجی پرمیوم روشن` / `.ایموجی پرمیوم خاموش`\n\n"
-                    "هلپر: @helperselfMR01_bot\n"
-                    "BotFather → Inline Feedback = 100%"
                 ),
                 41: (
                     "📩 منشی آفلاین | self MR\n\n"
@@ -17301,33 +17380,29 @@ async def hourly_diamond_deduction_task():
 # =============================================
 
 async def helper_start_handler(client, message):
-    """استارت هلپر — مثل pyiuebot"""
-    uname = (HELPER_INLINE_BOT or "helperselfMR01_bot").lstrip("@")
-    text = (
-        f"👑 به ربات تبدیل ایموجی پریمیوم خوش آمدید\n\n"
-        f"تعداد کانال‌های ثبت شده شما: 0\n\n"
-        f"‼️ نحوه استفاده:\n"
-        f"در هر چتی تایپ کنید:\n"
-        f"<code>@{uname}</code> متن [کد] متن\n\n"
-        f"مثال:\n"
-        f"<code>@{uname} سلام [6298332994260175589] خوبی؟</code>\n\n"
-        f"پیام شما تبدیل شده و قابل ارسال خواهد بود\n"
-        f"و توجه داشته باشید کد ایموجی را از کانال\n"
-        f"https://t.me/CustomEmojiPack بردارید"
-    )
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⭐ ایموجی‌های پرکاربرد", url="https://t.me/CustomEmojiPack"),
-            InlineKeyboardButton("💎 Rich Text/مقاله", url="https://t.me/CustomEmojiPack"),
-        ],
-        [
-            InlineKeyboardButton("➡️ راهنما", callback_data="helper_help"),
-        ],
-    ])
+    """استارت هلپر — فقط یک ایموجی/استیکر پریمیوم"""
     try:
-        await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
+        # اول از لیست ثبت‌شده مدیر
+        cid = None
+        fb = "⭐"
+        try:
+            items = list((MANAGER_PREMIUM_EMOJIS or {}).values())
+            if items:
+                cid = int(items[0].get("id") or 0) or None
+                fb = items[0].get("fallback") or "⭐"
+        except Exception:
+            pass
+        if not cid:
+            # یک custom emoji عمومی (قابل نمایش)
+            cid = 5368324170671202286
+        html = f'<tg-emoji emoji-id="{cid}">{fb}</tg-emoji>'
+        await message.reply_text(html, parse_mode=ParseMode.HTML)
     except Exception as e:
         logging.warning("helper_start: %s", e)
+        try:
+            await message.reply_text("⭐")
+        except Exception:
+            pass
 
 
 def _helper_code_re():
