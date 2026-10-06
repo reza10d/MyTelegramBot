@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+database_users/
+
+# Environment
+.env
+.env.local
+
+# Data files
+bot_data.json
+*.session
+*.session-journal
+downloads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
