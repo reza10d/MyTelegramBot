@@ -17478,55 +17478,89 @@ async def hourly_diamond_deduction_task():
 # =============================================
 
 async def helper_start_handler(client, message):
-    """استارت هلپر — تست ارسال ایموجی پرمیوم واقعی"""
-    # تست: آیا هلپر می‌تواند custom emoji بفرستد؟
-    TEST_PREMIUM_EMOJI_ID = 5123163417326126159
+    """استارت هلپر — راهنمای تست پرمیوم"""
     try:
-        # روش ۱: HTML رسمی Bot API / Pyrogram
-        html = f'<tg-emoji emoji-id="{TEST_PREMIUM_EMOJI_ID}">🔐</tg-emoji>'
-        await message.reply_text(html, parse_mode=ParseMode.HTML)
-        logging.info("helper_start: sent premium via HTML id=%s", TEST_PREMIUM_EMOJI_ID)
-        return
-    except Exception as e1:
-        logging.warning("helper_start HTML fail: %s", e1)
-    try:
-        # روش ۲: entity
-        from pyrogram.enums import MessageEntityType
-        from pyrogram.types import MessageEntity
-        ent = MessageEntity(
-            type=MessageEntityType.CUSTOM_EMOJI,
-            offset=0,
-            length=2,  # 🔐 surrogate pair
-            custom_emoji_id=TEST_PREMIUM_EMOJI_ID,
+        await message.reply_text(
+            "🧪 تست ایموجی پرمیوم\n\n"
+            "یک ایموجی **پرمیوم** (مثلاً لایک پرمیوم) را برای همین بات بفرست.\n"
+            "اگر بات همان را پرمیوم برگرداند → هلپر پرمیوم است.\n"
+            "اگر عادی/مربع شد → بات به پک دسترسی ندارد."
         )
-        await message.reply_text("🔐", entities=[ent])
-        logging.info("helper_start: sent premium via entity id=%s", TEST_PREMIUM_EMOJI_ID)
-        return
-    except Exception as e2:
-        logging.warning("helper_start entity fail: %s", e2)
-    try:
-        await message.reply_text("❌ هلپر نتوانست ایموجی پرمیوم بفرستد — اکانت سازنده بات احتمالاً پریمیوم نیست.")
     except Exception as e:
         logging.warning("helper_start: %s", e)
 
 
-def _helper_code_re():
-    import re as _re
-    return _re.compile(r"\[(\d{10,})\]")
-
-
-def _helper_build_html(text: str) -> str:
-    import html as _html
-    import re as _re
-    rx = _re.compile(r"\[(\d{10,})\]")
-    parts = []
-    last = 0
-    for m in rx.finditer(text or ""):
-        parts.append(_html.escape(text[last:m.start()]))
-        parts.append(f'<tg-emoji emoji-id="{m.group(1)}">⭐</tg-emoji>')
-        last = m.end()
-    parts.append(_html.escape((text or "")[last:]))
-    return "".join(parts)
+async def helper_echo_premium_test(client, message):
+    """اگر پیام شامل custom emoji باشد همان را برمی‌گرداند (تست واقعی)"""
+    try:
+        if not message or not message.from_user:
+            return
+        # فقط پیوی
+        if message.chat and getattr(message.chat, "type", None):
+            from pyrogram.enums import ChatType as _CT
+            if message.chat.type != _CT.PRIVATE:
+                return
+        pairs = []
+        text = message.text or message.caption or ""
+        ents = list(message.entities or []) + list(getattr(message, "caption_entities", None) or [])
+        for ent in ents:
+            cid = getattr(ent, "custom_emoji_id", None)
+            if not cid:
+                continue
+            try:
+                off = int(getattr(ent, "offset", 0) or 0)
+                ln = int(getattr(ent, "length", 1) or 1)
+                u16 = text.encode("utf-16-le")
+                ch = u16[off * 2:(off + ln) * 2].decode("utf-16-le", errors="ignore") or "👍"
+            except Exception:
+                ch = "👍"
+            pairs.append((ch, int(cid)))
+        # استیکر کاستوم
+        if not pairs and getattr(message, "sticker", None):
+            try:
+                from pyrogram.file_id import FileId
+                fid = FileId.decode(message.sticker.file_id)
+                doc = getattr(fid, "media_id", None) or getattr(fid, "id", None)
+                if doc:
+                    pairs.append((getattr(message.sticker, "emoji", None) or "👍", int(doc)))
+            except Exception:
+                pass
+        if not pairs:
+            # نادیده — متن عادی
+            return
+        ch, cid = pairs[0]
+        # ۱) HTML
+        try:
+            html = f'<tg-emoji emoji-id="{cid}">{ch}</tg-emoji>'
+            await message.reply_text(
+                f"تست HTML:\n{html}\n\n<code>{cid}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as e1:
+            logging.warning("helper echo HTML: %s", e1)
+        # ۲) entity
+        try:
+            from pyrogram.enums import MessageEntityType
+            from pyrogram.types import MessageEntity
+            ln = max(1, len(ch.encode("utf-16-le")) // 2)
+            ent = MessageEntity(
+                type=MessageEntityType.CUSTOM_EMOJI,
+                offset=0,
+                length=ln,
+                custom_emoji_id=int(cid),
+            )
+            await message.reply_text(ch, entities=[ent])
+            logging.info("helper echo entity ok cid=%s", cid)
+        except Exception as e2:
+            logging.warning("helper echo entity: %s", e2)
+            try:
+                await message.reply_text(
+                    f"❌ نتوانست پرمیوم بفرستد\nid=`{cid}`\n{e2}"
+                )
+            except Exception:
+                pass
+    except Exception as e:
+        logging.warning("helper_echo_premium_test: %s", e)
 
 
 async def helper_premium_message_handler(client, message):
@@ -17649,7 +17683,8 @@ async def start_helper_bot():
             bot_token=token,
         )
         helper_bot.add_handler(MessageHandler(helper_start_handler, filters.command("start") & filters.private))
-        helper_bot.add_handler(MessageHandler(helper_premium_message_handler, filters.private & filters.incoming))
+        helper_bot.add_handler(MessageHandler(helper_echo_premium_test, filters.private & filters.incoming), group=-1)
+        helper_bot.add_handler(MessageHandler(helper_premium_message_handler, filters.private & filters.incoming), group=1)
         helper_bot.add_handler(InlineQueryHandler(pemoji_premium_inline), group=0)
         helper_bot.add_handler(InlineQueryHandler(inline_panel_handler), group=1)
         try:
