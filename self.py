@@ -8252,13 +8252,13 @@ def _pemoji_parse(uid: int, query: str):
                 hit = k
                 break
         if hit:
-            # کاراکتر BMP به‌عنوان جای‌نشان + entity طول ۱ (روش پایدار بات)
+            # خود ایموجی + entity با طول utf-16 واقعی (نه ستاره)
             entities.append(raw_types.MessageEntityCustomEmoji(
                 offset=_utf16_len(text),
-                length=1,
+                length=_utf16_len(hit),
                 document_id=int(vmap[hit]),
             ))
-            text += PEMOJI_FALLBACK
+            text += hit
             i += len(hit)
             continue
         text += q[i]
@@ -8336,7 +8336,7 @@ async def pemoji_inline_answer(client, query, uid: int, q_text: str):
             "title": f"✦ ارسال با {len(entities)} ایموجی پرمیوم",
             "description": (q_text or "")[:64],
             "input_message_content": {
-                "message_text": text or PEMOJI_FALLBACK,
+                "message_text": text if text else "·",
                 "entities": api_ents,
             },
             "reply_markup": {"inline_keyboard": [[{"text": "✦", "callback_data": "pemnoop"}]]},
@@ -8353,7 +8353,7 @@ async def pemoji_inline_answer(client, query, uid: int, q_text: str):
                     id=str(_pem_uuid.uuid4()),
                     title=f"✦ ارسال با {len(entities)} ایموجی پرمیوم",
                     description=(q_text or "")[:64],
-                    input_message_content=InputTextMessageContent(text or PEMOJI_FALLBACK),
+                    input_message_content=InputTextMessageContent(text if text else "·"),
                     reply_markup=InlineKeyboardMarkup(
                         [[InlineKeyboardButton("✦", callback_data="pemnoop")]]
                     ),
@@ -8485,7 +8485,21 @@ async def pemoji_outgoing_watcher(client, message):
         )
         logging.info("pemoji OUTGOING inline sent uid=%s text=%r", uid, text[:30])
     except ChatSendInlineForbidden:
-        logging.warning("pemoji: ChatSendInlineForbidden")
+        logging.warning("pemoji: ChatSendInlineForbidden — fallback entity edit")
+        try:
+            vmap = _pemoji_variants(uid)
+            if text in vmap:
+                from pyrogram.enums import MessageEntityType
+                from pyrogram.types import MessageEntity
+                ln = _utf16_len(text)
+                ents = [MessageEntity(
+                    type=MessageEntityType.CUSTOM_EMOJI,
+                    offset=0, length=ln, custom_emoji_id=int(vmap[text]),
+                )]
+                await message.edit_text(text, entities=ents)
+                logging.info("pemoji fallback entity edit ok")
+        except Exception as e2:
+            logging.warning("pemoji fallback entity: %s", e2)
     except Exception as e:
         logging.debug("pemoji_outgoing_watcher: %s", e)
 
