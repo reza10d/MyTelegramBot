@@ -17478,18 +17478,34 @@ async def hourly_diamond_deduction_task():
 # =============================================
 
 async def helper_start_handler(client, message):
-    """استارت هلپر — فقط اگر ایموجی واقعی ثبت شده باشد"""
+    """استارت هلپر — تست ارسال ایموجی پرمیوم واقعی"""
+    # تست: آیا هلپر می‌تواند custom emoji بفرستد؟
+    TEST_PREMIUM_EMOJI_ID = 5123163417326126159
     try:
-        items = list((MANAGER_PREMIUM_EMOJIS or {}).values())
-        if items:
-            cid = int(items[0].get("id") or 0)
-            fb = items[0].get("fallback") or "⭐"
-            if cid:
-                html = f'<tg-emoji emoji-id="{cid}">{fb}</tg-emoji>'
-                await message.reply_text(html, parse_mode=ParseMode.HTML)
-                return
-        # بدون متن اضافه / بدون ستاره الکی
-        await message.reply_text("OK")
+        # روش ۱: HTML رسمی Bot API / Pyrogram
+        html = f'<tg-emoji emoji-id="{TEST_PREMIUM_EMOJI_ID}">🔐</tg-emoji>'
+        await message.reply_text(html, parse_mode=ParseMode.HTML)
+        logging.info("helper_start: sent premium via HTML id=%s", TEST_PREMIUM_EMOJI_ID)
+        return
+    except Exception as e1:
+        logging.warning("helper_start HTML fail: %s", e1)
+    try:
+        # روش ۲: entity
+        from pyrogram.enums import MessageEntityType
+        from pyrogram.types import MessageEntity
+        ent = MessageEntity(
+            type=MessageEntityType.CUSTOM_EMOJI,
+            offset=0,
+            length=2,  # 🔐 surrogate pair
+            custom_emoji_id=TEST_PREMIUM_EMOJI_ID,
+        )
+        await message.reply_text("🔐", entities=[ent])
+        logging.info("helper_start: sent premium via entity id=%s", TEST_PREMIUM_EMOJI_ID)
+        return
+    except Exception as e2:
+        logging.warning("helper_start entity fail: %s", e2)
+    try:
+        await message.reply_text("❌ هلپر نتوانست ایموجی پرمیوم بفرستد — اکانت سازنده بات احتمالاً پریمیوم نیست.")
     except Exception as e:
         logging.warning("helper_start: %s", e)
 
