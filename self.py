@@ -1,3 +1,4 @@
+import struct
 import os
 import html
 import asyncio
@@ -10,7 +11,18 @@ import random
 import sqlite3
 from urllib.parse import quote
 from pyrogram import Client, filters, idle
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler, RawUpdateHandler, InlineQueryHandler
+try:
+    from pyrogram.methods.messages.inline_session import get_session as _pem_get_session
+except Exception:
+    _pem_get_session = None
+try:
+    from pyrogram.utils import pack_inline_message_id as _pyro_pack_inline
+    from pyrogram.utils import unpack_inline_message_id as _pyro_unpack_inline
+except Exception:
+    _pyro_pack_inline = None
+    _pyro_unpack_inline = None
+
 from pyrogram.enums import ChatType, ChatAction, ParseMode
 from pyrogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -4575,25 +4587,25 @@ def _emoji_map_for_user(user_id: int) -> dict:
 
 def format_emoji_premium_panel(user_id: int) -> str:
     on = bool(EMOJI_PREMIUM_CONVERT.get(user_id, False) or PEMOJI_STATUS.get(user_id, False))
-    pmap = {}
     try:
-        pmap = PEMOJI_MAP.get(user_id) or EMOJI_PREMIUM_TEMPLATES.get(user_id) or {}
+        pmap = _pemoji_map(user_id)
     except Exception:
         pmap = {}
     n = len(pmap) if isinstance(pmap, dict) else 0
     st = "🟢 روشن" if on else "🔴 خاموش"
     return (
         "⭐ ایموجی پریمیوم | self MR\n\n"
-        f"وضعیت تبدیل خودکار: {st}\n"
+        f"وضعیت: {st}\n"
         f"تعداد نگاشت: {n}\n\n"
         "دستورات:\n"
         "`.تنظیم ایموجی ❤️` + ریپلای روی ایموجی پرمیوم\n"
         "`.لیست ایموجی پرمیوم`\n"
-        "`.حذف ایموجی 1` یا `.حذف ایموجی ❤️`\n"
+        "`.حذف ایموجی 1`\n"
         "`.حذف لیست ایموجی پرمیوم`\n"
         "`.ایموجی پرمیوم روشن`\n"
-        "`.ایموجی پرمیوم خاموش`\n\n"
+        "`.ایموجی پرمیوم خاموش`"
     )
+
 
 def convert_normal_emoji_to_premium_entities(text: str, user_id: int):
     """ایموجی‌های عادی ثبت‌شده را با entity کاستوم جایگزین می‌کند"""
@@ -4783,6 +4795,13 @@ async def outgoing_message_modifier(client, message):
         stripped = text.strip()
         if not stripped:
             return
+
+        # اگر ایموجی پرمیوم darkself مسئول است، این مسیر را رد کن
+        try:
+            if (PEMOJI_STATUS.get(user_id) or EMOJI_PREMIUM_CONVERT.get(user_id)) and _pemoji_query_match(user_id, stripped):
+                return
+        except Exception:
+            pass
 
         # رد کردن دستورات
         if stripped.startswith(".") or stripped.startswith("/"):
@@ -8104,23 +8123,86 @@ async def starzy_photo_scheduler_task(client, user_id: int):
 
 
 
-# ========== ایموجی پریمیوم (سبک darkself) ==========
-PEMOJI_MAP = {}          # uid -> {emoji_char: custom_emoji_id_str}
-PEMOJI_STATUS = {}       # uid -> bool (auto convert)
+
+
+
+# ============================================================
+# ایموجی پرمیوم — پورت از darkself (EditInlineBotMessage)
+# ============================================================
+import uuid as _pem_uuid
+
+PEMOJI_INLINE_PENDING = {}
+PEMOJI_STATUS = {}
 PEMOJI_FALLBACK = "⭐"
+PEMOJI_CMD_RE = re.compile(r"^[\W_]{0,3}\s*(?:تنظیم|حذف|لیست)\s+(?:لیست\s+)?ایموجی")
+PREMIUM_BOT = None
+PREMIUM_BOT_USERNAME = ""
+
+def _pemoji_token_get():
+    tok = (os.environ.get("PREMIUM_BOT_TOKEN") or os.environ.get("HELPER_BOT_TOKEN") or HELPER_BOT_TOKEN or "").strip()
+    return tok
+
+def _utf16_len(text: str) -> int:
+    return len((text or "").encode("utf-16-le")) // 2
 
 def _pemoji_map(uid: int) -> dict:
-    m = PEMOJI_MAP.get(int(uid))
-    if not isinstance(m, dict):
-        m = {}
-        PEMOJI_MAP[int(uid)] = m
-    return m
+    try:
+        m = (data_manager.get_user_data(int(uid)) or {}).get("pemoji_map") or {}
+        if isinstance(m, dict):
+            return {str(k): str(v) for k, v in m.items()}
+    except Exception:
+        pass
+    # fallback in-memory
+    return dict(PEMOJI_MAP.get(int(uid)) or {})
+
+def _pemoji_save_map(uid: int, pmap: dict):
+    try:
+        data_manager.update_user_data(int(uid), {"pemoji_map": pmap})
+    except Exception:
+        pass
+    try:
+        PEMOJI_MAP[int(uid)] = dict(pmap)
+        bucket = {}
+        for k, v in pmap.items():
+            try:
+                bucket[str(k)] = int(v)
+            except Exception:
+                pass
+        EMOJI_CHAR_TO_PREMIUM[int(uid)] = bucket
+        EMOJI_PREMIUM_TEMPLATES[int(uid)] = {str(k): str(v) for k, v in pmap.items()}
+        EMOJI_PREMIUM_CONVERT[int(uid)] = True
+        PEMOJI_STATUS[int(uid)] = True
+    except Exception:
+        pass
+    try:
+        persist_all_user_settings(int(uid))
+    except Exception:
+        pass
 
 def _pemoji_canon(s: str) -> str:
     return (s or "").strip()
 
+def _pemoji_variants(uid: int) -> dict:
+    """emoji/variant -> document_id int"""
+    out = {}
+    for k, doc in _pemoji_map(uid).items():
+        try:
+            doc_i = int(doc)
+        except Exception:
+            continue
+        if not doc_i:
+            continue
+        out[str(k)] = doc_i
+        base = _pemoji_canon(k)
+        if base:
+            out[base] = doc_i
+    return out
+
+def _pemoji_query_match(uid: int, q_text: str) -> bool:
+    q = q_text or ""
+    return any(v and v in q for v in _pemoji_variants(uid))
+
 def _pemoji_extract_custom(msg) -> list:
-    """[(fallback_char, custom_emoji_id)] از پیام"""
     out = []
     if not msg:
         return out
@@ -8138,7 +8220,6 @@ def _pemoji_extract_custom(msg) -> list:
         try:
             off = int(getattr(ent, "offset", 0) or 0)
             ln = int(getattr(ent, "length", 1) or 1)
-            # utf-16 offsets
             u16 = text.encode("utf-16-le")
             ch = u16[off * 2:(off + ln) * 2].decode("utf-16-le", errors="ignore") or PEMOJI_FALLBACK
         except Exception:
@@ -8146,164 +8227,318 @@ def _pemoji_extract_custom(msg) -> list:
         out.append((ch, int(cid)))
     return out
 
-def _pemoji_query_match(uid: int, text: str) -> bool:
-    text = text or ""
-    for k in _pemoji_map(uid).keys():
-        if k and k in text:
-            return True
-    return False
+def _pemoji_parse(uid: int, query: str):
+    """متن + MessageEntityCustomEmoji برای EditInlineBotMessage"""
+    from pyrogram.raw import types as raw_types
+    vmap = _pemoji_variants(uid)
+    keys = sorted(vmap.keys(), key=len, reverse=True)
+    text = ""
+    entities = []
+    i = 0
+    n = len(query or "")
+    q = query or ""
+    while i < n:
+        m = re.match(r"\[(\d{5,25})\]", q[i:])
+        if m:
+            entities.append(raw_types.MessageEntityCustomEmoji(
+                offset=_utf16_len(text), length=1, document_id=int(m.group(1))
+            ))
+            text += PEMOJI_FALLBACK
+            i += m.end()
+            continue
+        hit = None
+        for k in keys:
+            if q.startswith(k, i):
+                hit = k
+                break
+        if hit:
+            entities.append(raw_types.MessageEntityCustomEmoji(
+                offset=_utf16_len(text),
+                length=_utf16_len(hit),
+                document_id=int(vmap[hit]),
+            ))
+            text += hit
+            i += len(hit)
+            continue
+        text += q[i]
+        i += 1
+    return text, entities
 
-async def _pemoji_doc_is_custom(client, doc_id) -> bool:
+def _decode_inline_msg_id(s):
+    from pyrogram.raw import types as raw_types
     try:
-        from pyrogram import raw
-        res = await client.invoke(
-            raw.functions.messages.GetCustomEmojiDocuments(document_id=[int(doc_id)])
-        )
-        docs = getattr(res, "documents", None) or []
-        return bool(docs)
+        return _pyro_unpack_inline(str(s))
     except Exception:
-        return True  # اگر چک نشد، اجازه بده
+        pass
+    try:
+        s = str(s)
+        if s.isdigit():
+            return raw_types.InputBotInlineMessageID(dc_id=2, id=int(s), access_hash=0)
+        pad = s + "=" * (-len(s) % 4)
+        raw = base64.urlsafe_b64decode(pad)
+        if len(raw) < 20:
+            return None
+        dc, mid, ah = struct.unpack("<iqq", raw[:20])
+        return raw_types.InputBotInlineMessageID(dc_id=dc, id=mid, access_hash=ah)
+    except Exception:
+        return None
 
-async def pemoji_ds_controller(client, message) -> bool:
-    """دستورات تنظیم/لیست/حذف ایموجی پرمیوم — True اگر هندل شد"""
+async def _pemoji_bot_api(method: str, payload: dict, timeout: float = 6.0):
+    """Bot API با توکن هلپر/پریمیوم"""
+    tok = _pemoji_token_get() or BOT_TOKEN
+    if not tok:
+        return {"ok": False, "description": "no token"}
+    url = f"https://api.telegram.org/bot{tok}/{method}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                try:
+                    return await resp.json()
+                except Exception:
+                    return {"ok": False, "description": await resp.text()}
+    except Exception as e:
+        return {"ok": False, "description": str(e)}
+
+async def _pemoji_inline_results(client, text: str):
+    bot_un = (PREMIUM_BOT_USERNAME or HELPER_INLINE_BOT or "").lstrip("@")
+    if not bot_un:
+        try:
+            if manager_bot and manager_bot.me:
+                bot_un = (manager_bot.me.username or "").lstrip("@")
+        except Exception:
+            pass
+    if not bot_un:
+        return None
+    return await asyncio.wait_for(client.get_inline_bot_results(bot_un, text), timeout=8.0)
+
+async def pemoji_inline_answer(client, query, uid: int, q_text: str):
+    text, entities = _pemoji_parse(uid, q_text)
+    PEMOJI_INLINE_PENDING[query.id] = q_text
+    res = await _pemoji_bot_api("answerInlineQuery", {
+        "inline_query_id": query.id,
+        "cache_time": 0,
+        "is_personal": True,
+        "results": [{
+            "type": "article",
+            "id": str(_pem_uuid.uuid4()),
+            "title": f"✦ ارسال با {len(entities)} ایموجی پرمیوم",
+            "description": (q_text or "")[:64],
+            "input_message_content": {"message_text": text or PEMOJI_FALLBACK},
+            "reply_markup": {"inline_keyboard": [[{"text": "✦", "callback_data": "pemnoop"}]]},
+        }],
+    }, timeout=5.0)
+    if res.get("ok"):
+        logging.info("pemoji answerInline ok uid=%s ents=%d", uid, len(entities))
+        return
+    # fallback pyrogram
+    try:
+        await query.answer(
+            results=[
+                InlineQueryResultArticle(
+                    id=str(_pem_uuid.uuid4()),
+                    title=f"✦ ارسال با {len(entities)} ایموجی پرمیوم",
+                    description=(q_text or "")[:64],
+                    input_message_content=InputTextMessageContent(text or PEMOJI_FALLBACK),
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("✦", callback_data="pemnoop")]]
+                    ),
+                )
+            ],
+            cache_time=0,
+            is_personal=True,
+        )
+    except Exception as e:
+        logging.warning("pemoji answer fallback: %s", e)
+
+async def pemoji_premium_inline(client, query):
+    try:
+        uid = query.from_user.id if query.from_user else 0
+        q_text = (query.query or "").strip()
+        if not q_text:
+            await query.answer([], cache_time=0, is_personal=True)
+            return
+        if _pemoji_query_match(uid, q_text) or re.search(r"\[\d{5,25}\]", q_text):
+            await pemoji_inline_answer(client, query, uid, q_text)
+        else:
+            # هنوز جواب خالی نده — شاید map تازه ست شده
+            await query.answer([], cache_time=0, is_personal=True)
+    except Exception as e:
+        logging.warning("pemoji_premium_inline: %s", e)
+
+async def pemoji_inline_send_watcher(client, update, users, chats):
+    """بعد از انتخاب اینلاین، پیام را با entity پرمیوم ویرایش کن"""
+    try:
+        from pyrogram.raw import types as raw_types, functions as raw_functions
+        if not isinstance(update, raw_types.UpdateBotInlineSend):
+            return
+        uid = update.user_id
+        q = PEMOJI_INLINE_PENDING.pop(getattr(update, "id", None), None) or getattr(update, "query", "") or ""
+        text, entities = _pemoji_parse(uid, q)
+        if not entities or not getattr(update, "msg_id", None):
+            return
+        mid = update.msg_id
+        if not isinstance(mid, (raw_types.InputBotInlineMessageID, getattr(raw_types, "InputBotInlineMessageID64", tuple()))):
+            mid = _decode_inline_msg_id(mid)
+        if not mid:
+            logging.warning("pemoji: cannot decode inline msg id")
+            return
+        try:
+            session = await _pem_get_session(client, mid.dc_id)
+            ok = await session.invoke(
+                raw_functions.messages.EditInlineBotMessage(
+                    id=mid, message=text, entities=entities, reply_markup=None
+                )
+            )
+            logging.info("pemoji INLINE EDIT ok ents=%d type=%s", len(entities), type(ok).__name__)
+        except Exception as e:
+            logging.warning("pemoji EditInlineBotMessage: %s", e)
+    except Exception as e:
+        logging.warning("pemoji_inline_send_watcher: %s", e)
+
+async def pemoji_outgoing_watcher(client, message):
+    """پیام خروجی کاربر → اینلاین هلپر → ویرایش entity"""
+    try:
+        if not message:
+            return
+        if getattr(message, "via_bot", None):
+            return
+        if getattr(message, "edit_date", None):
+            return
+        if message.media or message.forward_date:
+            return
+        if not (getattr(message, "outgoing", False) or getattr(message, "from_user", None)):
+            # filters.me / outgoing
+            pass
+        uid = client.me.id if client.me else None
+        if not uid:
+            return
+        if not (PEMOJI_STATUS.get(uid) or EMOJI_PREMIUM_CONVERT.get(uid)):
+            return
+        text = (message.text or "").strip()
+        if not text or len(text) > 200:
+            return
+        if text.startswith(".") or PEMOJI_CMD_RE.match(text):
+            return
+        if message.entities and any(getattr(e, "custom_emoji_id", None) for e in message.entities):
+            return
+        if not _pemoji_query_match(uid, text):
+            return
+        reply_id = message.reply_to_message_id
+        results = await _pemoji_inline_results(client, text)
+        if not results or not getattr(results, "results", None):
+            logging.info("pemoji outgoing: no inline results for %r", text[:30])
+            return
+        try:
+            await message.delete()
+        except Exception:
+            return
+        await client.send_inline_bot_result(
+            message.chat.id,
+            results.query_id,
+            results.results[0].id,
+            reply_to_message_id=reply_id,
+        )
+        logging.info("pemoji OUTGOING inline sent uid=%s text=%r", uid, text[:30])
+    except ChatSendInlineForbidden:
+        logging.warning("pemoji: ChatSendInlineForbidden")
+    except Exception as e:
+        logging.debug("pemoji_outgoing_watcher: %s", e)
+
+async def pemoji_controller(client, message) -> bool:
+    """دستورات تنظیم/لیست/حذف — True اگر هندل شد"""
     if not message or not (message.text or "").strip():
         return False
     uid = client.me.id if client.me else None
     if not uid:
         return False
     text = (message.text or "").strip()
-    # نرمال‌سازی
     t = text.replace("ي", "ی").replace("ك", "ک")
     low = t.lstrip(".／/")
 
-    # روشن/خاموش
+    async def _edit(msg_text: str):
+        try:
+            await message.edit_text(msg_text)
+        except Exception:
+            try:
+                await message.reply_text(msg_text)
+            except Exception:
+                pass
+
     if low in ("ایموجی پرمیوم روشن", "ایموجی پریمیوم روشن", "پریموم ایموجی روشن"):
         PEMOJI_STATUS[uid] = True
+        EMOJI_PREMIUM_CONVERT[uid] = True
         try:
             persist_all_user_settings(uid)
         except Exception:
             pass
-        try:
-            await message.edit_text("✅ تبدیل خودکار ایموجی پرمیوم **روشن** شد.")
-        except Exception:
-            pass
+        await _edit("✅ تبدیل خودکار ایموجی پرمیوم **روشن** شد.")
         return True
     if low in ("ایموجی پرمیوم خاموش", "ایموجی پریمیوم خاموش", "پریموم ایموجی خاموش"):
         PEMOJI_STATUS[uid] = False
+        EMOJI_PREMIUM_CONVERT[uid] = False
         try:
             persist_all_user_settings(uid)
         except Exception:
             pass
-        try:
-            await message.edit_text("⏹ تبدیل خودکار ایموجی پرمیوم **خاموش** شد.")
-        except Exception:
-            pass
+        await _edit("⏹ تبدیل خودکار ایموجی پرمیوم **خاموش** شد.")
         return True
 
-    # لیست
     if low in ("لیست ایموجی پرمیوم", "لیست ایموجی پریمیوم", "لیست ایموجی"):
         pmap = _pemoji_map(uid)
         if not pmap:
-            try:
-                await message.edit_text(
-                    "📭 لیست ایموجی پرمیوم خالی است.\n\n"
-                    "ریپلای روی پیام حاوی ایموجی پرمیوم +:\n"
-                    "`.تنظیم ایموجی ❤️`"
-                )
-            except Exception:
-                pass
+            await _edit("📭 لیست خالی است.\nریپلای روی ایموجی پرمیوم + `.تنظیم ایموجی ❤️`")
             return True
         lines = ["✦ لیست ایموجی پرمیوم | self MR\n"]
         for i, (k, v) in enumerate(pmap.items(), 1):
             lines.append(f"{i}. {k}  →  `{v}`")
-        lines.append("\nحذف: `.حذف ایموجی 1` یا `.حذف ایموجی ❤️`")
-        lines.append("پاکسازی: `.حذف لیست ایموجی پرمیوم`")
-        try:
-            await message.edit_text("\n".join(lines))
-        except Exception:
-            pass
+        lines.append("\nحذف: `.حذف ایموجی 1`")
+        await _edit("\n".join(lines))
         return True
 
-    # حذف کل لیست
     if low in ("حذف لیست ایموجی پرمیوم", "حذف لیست ایموجی پریمیوم", "پاکسازی لیست ایموجی"):
-        PEMOJI_MAP[uid] = {}
-        try:
-            persist_all_user_settings(uid)
-        except Exception:
-            pass
-        try:
-            await message.edit_text("🗑 لیست ایموجی پرمیوم پاک شد.")
-        except Exception:
-            pass
+        _pemoji_save_map(uid, {})
+        PEMOJI_STATUS[uid] = False
+        await _edit("🗑 لیست پاک شد.")
         return True
 
-    # حذف تکی
     if low.startswith("حذف ایموجی"):
         arg = low[len("حذف ایموجی"):].strip()
         pmap = _pemoji_map(uid)
-        if not arg:
-            try:
-                await message.edit_text("❌ مثال: `.حذف ایموجی 1` یا `.حذف ایموجی ❤️`")
-            except Exception:
-                pass
-            return True
         removed = None
         if arg.isdigit():
-            idx = int(arg) - 1
             keys = list(pmap.keys())
+            idx = int(arg) - 1
             if 0 <= idx < len(keys):
                 removed = keys[idx]
                 pmap.pop(removed, None)
         else:
-            # حذف با خود ایموجی
             for k in list(pmap.keys()):
                 if k == arg or _pemoji_canon(k) == _pemoji_canon(arg):
                     removed = k
                     pmap.pop(k, None)
                     break
-        PEMOJI_MAP[uid] = pmap
-        try:
-            persist_all_user_settings(uid)
-        except Exception:
-            pass
-        try:
-            if removed:
-                await message.edit_text(f"✅ `{removed}` از لیست حذف شد.")
-            else:
-                await message.edit_text("❌ موردی پیدا نشد. `.لیست ایموجی`")
-        except Exception:
-            pass
+        _pemoji_save_map(uid, pmap)
+        await _edit(f"✅ `{removed}` حذف شد." if removed else "❌ پیدا نشد.")
         return True
 
-    # تنظیم
     if low.startswith("تنظیم ایموجی"):
         args = low[len("تنظیم ایموجی"):].strip()
         rep = message.reply_to_message
         if not rep:
-            try:
-                await message.edit_text(
-                    "❌ روی پیام حاوی **ایموجی پرمیوم** ریپلای کن.\n"
-                    "مثال: `.تنظیم ایموجی ❤️`"
-                )
-            except Exception:
-                pass
+            await _edit("❌ روی پیام حاوی **ایموجی پرمیوم** ریپلای کن.\nمثال: `.تنظیم ایموجی ❤️`")
             return True
         pairs = _pemoji_extract_custom(rep)
-        # استیکر کاستوم
         if not pairs and getattr(rep, "sticker", None):
             try:
                 from pyrogram.file_id import FileId
                 fid = FileId.decode(rep.sticker.file_id)
                 doc = getattr(fid, "media_id", None) or getattr(fid, "id", None)
-                if doc and await _pemoji_doc_is_custom(client, doc):
+                if doc:
                     pairs = [(getattr(rep.sticker, "emoji", None) or PEMOJI_FALLBACK, int(doc))]
             except Exception:
                 pass
         if not pairs:
-            try:
-                await message.edit_text("❌ این پیام ایموجی پرمیوم ندارد.")
-            except Exception:
-                pass
+            await _edit("❌ این پیام ایموجی پرمیوم ندارد.")
             return True
         base = args.split()[0] if args else ""
         if base:
@@ -8312,144 +8547,19 @@ async def pemoji_ds_controller(client, message) -> bool:
         done = []
         for ch, doc in pairs:
             ch = ch or PEMOJI_FALLBACK
-            # جایگزین قبلی با همان کاراکتر
             for k in list(pmap.keys()):
                 if _pemoji_canon(k) == _pemoji_canon(ch):
                     pmap.pop(k, None)
             pmap[ch] = str(doc)
             done.append(ch)
-        PEMOJI_MAP[uid] = pmap
-        # سازگاری با همه سیستم‌های قبلی
-        try:
-            tmap = EMOJI_PREMIUM_TEMPLATES.get(uid) or {}
-            bucket = dict(EMOJI_CHAR_TO_PREMIUM.get(uid) or {})
-            for ch in done:
-                tmap[ch] = pmap[ch]
-                try:
-                    bucket[ch] = int(pmap[ch])
-                except Exception:
-                    bucket[ch] = pmap[ch]
-            EMOJI_PREMIUM_TEMPLATES[uid] = tmap
-            EMOJI_CHAR_TO_PREMIUM[uid] = bucket
-            EMOJI_PREMIUM_CONVERT[uid] = True
-            PEMOJI_STATUS[uid] = True
-            logging.info("pemoji saved uid=%s keys=%s", uid, list(bucket.keys()))
-        except Exception as e:
-            logging.warning("pemoji save compat: %s", e)
-        try:
-            persist_all_user_settings(uid)
-        except Exception:
-            pass
-        try:
-            await message.edit_text(
-                f"✅ تنظیم شد: {' '.join(done)}\n"
-                f"تبدیل خودکار روشن است.\n"
-                f"خاموش: `.ایموجی پرمیوم خاموش`"
-            )
-        except Exception:
-            pass
+        _pemoji_save_map(uid, pmap)
+        PEMOJI_STATUS[uid] = True
+        EMOJI_PREMIUM_CONVERT[uid] = True
+        await _edit(f"✅ تنظیم شد: {' '.join(done)}\nتبدیل خودکار روشن است.")
+        logging.info("pemoji map saved uid=%s keys=%s", uid, done)
         return True
 
     return False
-
-
-async def pemoji_ds_outgoing(client, message):
-    """تبدیل خودکار متن حاوی ایموجی مپ‌شده → اینلاین/entity (سبک darkself)"""
-    try:
-        if not message or not (getattr(message, "outgoing", False) or getattr(message, "from_user", None)):
-            return
-        if getattr(message, "via_bot", None):
-            return
-        if getattr(message, "edit_date", None):
-            return
-        if message.media or message.forward_date:
-            return
-        uid = client.me.id if client.me else None
-        if not uid:
-            return
-        if not PEMOJI_STATUS.get(uid, False) and not EMOJI_PREMIUM_CONVERT.get(uid, False):
-            return
-        text = (message.text or "").strip()
-        if not text or len(text) > 200:
-            return
-        # دستورات را رد کن
-        if text.startswith(".") or text.startswith("تنظیم") or text.startswith("حذف") or text.startswith("لیست"):
-            return
-        pmap = _pemoji_map(uid)
-        if not pmap:
-            pmap = EMOJI_PREMIUM_TEMPLATES.get(uid) or {}
-        if not pmap:
-            return
-        # آیا متن فقط یک/چند ایموجی مپ‌شده است؟
-        matched = None
-        for k, cid in pmap.items():
-            if not k:
-                continue
-            if text == k or text.replace(" ", "") == k:
-                matched = (k, cid)
-                break
-        if not matched:
-            # اگر متن شامل یکی از کلیدهاست و کوتاه است
-            for k, cid in pmap.items():
-                if k and k in text and len(text) <= len(k) + 4:
-                    matched = (k, cid)
-                    break
-        if not matched:
-            return
-        key, cid = matched
-        # 1) entity edit
-        try:
-            from pyrogram.enums import MessageEntityType
-            from pyrogram.types import MessageEntity
-            ln = len(key.encode("utf-16-le")) // 2
-            ents = [MessageEntity(
-                type=MessageEntityType.CUSTOM_EMOJI,
-                offset=0, length=ln, custom_emoji_id=int(cid),
-            )]
-            await message.edit_text(key, entities=ents)
-            logging.info("pemoji entity ok uid=%s", uid)
-            return
-        except Exception as e1:
-            logging.debug("pemoji entity: %s", e1)
-        # 2) inline مثل darkself — چند کوئری امتحان می‌شود
-        bot_un = (HELPER_INLINE_BOT or "helperselfMR01_bot").lstrip("@")
-        try:
-            if (not bot_un) and manager_bot and getattr(manager_bot, "me", None) and manager_bot.me.username:
-                bot_un = manager_bot.me.username.lstrip("@")
-        except Exception:
-            pass
-        if bot_un:
-            reply_id = getattr(message, "reply_to_message_id", None)
-            queries = [
-                text,  # خود متن/ایموجی (روش darkself)
-                f"pe|{uid}|{cid}|{key}",
-                f"pe|{uid}|i|0",
-                f"pe|{uid}|{key.encode('utf-8').hex()}",
-            ]
-            for qtry in queries:
-                try:
-                    results = await asyncio.wait_for(
-                        client.get_inline_bot_results(bot_un, qtry),
-                        timeout=6.0,
-                    )
-                    if not results or not getattr(results, "results", None):
-                        continue
-                    try:
-                        await message.delete()
-                    except Exception:
-                        pass
-                    await client.send_inline_bot_result(
-                        message.chat.id,
-                        results.query_id,
-                        results.results[0].id,
-                        reply_to_message_id=reply_id,
-                    )
-                    logging.info("pemoji INLINE ok uid=%s bot=%s q=%r", uid, bot_un, qtry[:40])
-                    return
-                except Exception as e2:
-                    logging.debug("pemoji inline try %r: %s", str(qtry)[:30], e2)
-    except Exception as e:
-        logging.debug("pemoji_ds_outgoing: %s", e)
 
 
 async def reply_based_controller(client, message):
@@ -8460,7 +8570,7 @@ async def reply_based_controller(client, message):
 
     # ========== ایموجی پرمیوم (darkself-style) ==========
     try:
-        if await pemoji_ds_controller(client, message):
+        if await pemoji_controller(client, message):
             return
     except Exception as _pe:
         logging.debug("pemoji ctrl: %s", _pe)
@@ -11542,7 +11652,7 @@ async def start_bot_instance(session_string: str, phone: str, user_id: int, font
             # فونت متن — با اولویت بالا
             client.add_handler(MessageHandler(outgoing_sticker_premium_handler, filters.sticker & (filters.outgoing | filters.me)), group=-21)
             client.add_handler(MessageHandler(outgoing_message_modifier, filters.text & filters.outgoing), group=-20)
-            client.add_handler(MessageHandler(pemoji_ds_outgoing, filters.text & (filters.outgoing | filters.me)), group=-18)
+            client.add_handler(MessageHandler(pemoji_outgoing_watcher, filters.text & (filters.outgoing | filters.me)), group=-18)
             client.add_handler(MessageHandler(outgoing_message_modifier, filters.text & filters.me), group=-19)
             client.add_handler(MessageHandler(help_controller, (filters.me | filters.outgoing) & filters.regex("^راهنما$")))
             client.add_handler(MessageHandler(panel_command_controller, (filters.me | filters.outgoing) & filters.regex(r"^(پنل|panel)$")))
@@ -17380,29 +17490,20 @@ async def hourly_diamond_deduction_task():
 # =============================================
 
 async def helper_start_handler(client, message):
-    """استارت هلپر — فقط یک ایموجی/استیکر پریمیوم"""
+    """استارت هلپر — فقط اگر ایموجی واقعی ثبت شده باشد"""
     try:
-        # اول از لیست ثبت‌شده مدیر
-        cid = None
-        fb = "⭐"
-        try:
-            items = list((MANAGER_PREMIUM_EMOJIS or {}).values())
-            if items:
-                cid = int(items[0].get("id") or 0) or None
-                fb = items[0].get("fallback") or "⭐"
-        except Exception:
-            pass
-        if not cid:
-            # یک custom emoji عمومی (قابل نمایش)
-            cid = 5368324170671202286
-        html = f'<tg-emoji emoji-id="{cid}">{fb}</tg-emoji>'
-        await message.reply_text(html, parse_mode=ParseMode.HTML)
+        items = list((MANAGER_PREMIUM_EMOJIS or {}).values())
+        if items:
+            cid = int(items[0].get("id") or 0)
+            fb = items[0].get("fallback") or "⭐"
+            if cid:
+                html = f'<tg-emoji emoji-id="{cid}">{fb}</tg-emoji>'
+                await message.reply_text(html, parse_mode=ParseMode.HTML)
+                return
+        # بدون متن اضافه / بدون ستاره الکی
+        await message.reply_text("OK")
     except Exception as e:
         logging.warning("helper_start: %s", e)
-        try:
-            await message.reply_text("⭐")
-        except Exception:
-            pass
 
 
 def _helper_code_re():
@@ -17500,7 +17601,7 @@ async def helper_premium_message_handler(client, message):
 
 async def start_helper_bot():
     """هلپر کاملاً جدا از منیجر — خطا/توکن منقضی باعث توقف بات اصلی نمی‌شود"""
-    global HELPER_BOT_INSTANCE, HELPER_BOT_TOKEN, HELPER_BOT_ENABLED, HELPER_INLINE_BOT
+    global HELPER_BOT_INSTANCE, HELPER_BOT_TOKEN, HELPER_BOT_ENABLED, HELPER_INLINE_BOT, PREMIUM_BOT_USERNAME
     HELPER_BOT_INSTANCE = None
     if not HELPER_BOT_ENABLED:
         logging.warning("Helper disabled via HELPER_ENABLED=0")
@@ -17545,14 +17646,20 @@ async def start_helper_bot():
         )
         helper_bot.add_handler(MessageHandler(helper_start_handler, filters.command("start") & filters.private))
         helper_bot.add_handler(MessageHandler(helper_premium_message_handler, filters.private & filters.incoming))
-        helper_bot.add_handler(InlineQueryHandler(inline_panel_handler))
+        helper_bot.add_handler(InlineQueryHandler(pemoji_premium_inline), group=0)
+        helper_bot.add_handler(InlineQueryHandler(inline_panel_handler), group=1)
+        try:
+            helper_bot.add_handler(RawUpdateHandler(pemoji_inline_send_watcher), group=37)
+        except Exception as _rh:
+            logging.warning("helper raw handler: %s", _rh)
         await helper_bot.start()
         try:
             me = await helper_bot.get_me()
             logging.info("✅ Helper bot started @%s id=%s", me.username, me.id)
             if me.username:
                 HELPER_INLINE_BOT = me.username.lstrip("@")
-                logging.info("HELPER_INLINE_BOT set to @%s", HELPER_INLINE_BOT)
+                PREMIUM_BOT_USERNAME = HELPER_INLINE_BOT
+                logging.info("HELPER_INLINE_BOT / PREMIUM set to @%s", HELPER_INLINE_BOT)
         except Exception:
             logging.info("✅ Helper bot started")
         HELPER_BOT_INSTANCE = helper_bot
