@@ -8252,12 +8252,13 @@ def _pemoji_parse(uid: int, query: str):
                 hit = k
                 break
         if hit:
+            # کاراکتر BMP به‌عنوان جای‌نشان + entity طول ۱ (روش پایدار بات)
             entities.append(raw_types.MessageEntityCustomEmoji(
                 offset=_utf16_len(text),
-                length=_utf16_len(hit),
+                length=1,
                 document_id=int(vmap[hit]),
             ))
-            text += hit
+            text += PEMOJI_FALLBACK
             i += len(hit)
             continue
         text += q[i]
@@ -8314,6 +8315,17 @@ async def _pemoji_inline_results(client, text: str):
 async def pemoji_inline_answer(client, query, uid: int, q_text: str):
     text, entities = _pemoji_parse(uid, q_text)
     PEMOJI_INLINE_PENDING[query.id] = q_text
+    api_ents = []
+    for e in entities:
+        try:
+            api_ents.append({
+                "type": "custom_emoji",
+                "offset": int(getattr(e, "offset", 0)),
+                "length": int(getattr(e, "length", 1)),
+                "custom_emoji_id": str(getattr(e, "document_id", "")),
+            })
+        except Exception:
+            pass
     res = await _pemoji_bot_api("answerInlineQuery", {
         "inline_query_id": query.id,
         "cache_time": 0,
@@ -8323,7 +8335,10 @@ async def pemoji_inline_answer(client, query, uid: int, q_text: str):
             "id": str(_pem_uuid.uuid4()),
             "title": f"✦ ارسال با {len(entities)} ایموجی پرمیوم",
             "description": (q_text or "")[:64],
-            "input_message_content": {"message_text": text or PEMOJI_FALLBACK},
+            "input_message_content": {
+                "message_text": text or PEMOJI_FALLBACK,
+                "entities": api_ents,
+            },
             "reply_markup": {"inline_keyboard": [[{"text": "✦", "callback_data": "pemnoop"}]]},
         }],
     }, timeout=5.0)
@@ -8389,9 +8404,39 @@ async def pemoji_inline_send_watcher(client, update, users, chats):
                     id=mid, message=text, entities=entities, reply_markup=None
                 )
             )
-            logging.info("pemoji INLINE EDIT ok ents=%d type=%s", len(entities), type(ok).__name__)
+            logging.info(
+                "pemoji INLINE EDIT ok ents=%d type=%s docs=%s text=%r",
+                len(entities), type(ok).__name__,
+                [getattr(e, "document_id", None) for e in entities],
+                text[:20],
+            )
         except Exception as e:
             logging.warning("pemoji EditInlineBotMessage: %s", e)
+            # fallback: Bot API با entities
+            try:
+                packed = None
+                try:
+                    if _pyro_pack_inline:
+                        packed = _pyro_pack_inline(mid)
+                except Exception:
+                    packed = None
+                api_ents = []
+                for e in entities:
+                    api_ents.append({
+                        "type": "custom_emoji",
+                        "offset": int(getattr(e, "offset", 0)),
+                        "length": int(getattr(e, "length", 1)),
+                        "custom_emoji_id": str(getattr(e, "document_id", "")),
+                    })
+                if packed:
+                    res = await _pemoji_bot_api("editMessageText", {
+                        "inline_message_id": packed,
+                        "text": text,
+                        "entities": api_ents,
+                    })
+                    logging.info("pemoji botapi edit fallback: %s", res)
+            except Exception as e2:
+                logging.warning("pemoji botapi edit fallback fail: %s", e2)
     except Exception as e:
         logging.warning("pemoji_inline_send_watcher: %s", e)
 
@@ -12129,88 +12174,17 @@ async def inline_panel_handler(client, query):
     global MANAGER_BOT_USERNAME
     user_id = query.from_user.id if query.from_user else 0
     q = (query.query or "").strip()
+    # اگر کوئری فقط ایموجی مپ‌شده است، بگذار pemoji_premium_inline جواب بدهد
+    try:
+        if q and _pemoji_query_match(user_id, q):
+            await pemoji_premium_inline(client, query)
+            return
+    except Exception:
+        pass
 
     # ===== ایموجی پریمیوم از طریق اینلاین =====
     # فرمت‌ها: pe|uid|hex  یا  pe|uid|i|slot  یا  pe:uid:hex
 
-    # --- darkself-style: کوئری = خود ایموجی/متن نگاشت‌شده ---
-    try:
-        mapping = _emoji_map_for_user(user_id)
-        if mapping and q and not q.startswith("pe|") and not q.startswith("pe:") and "[" not in q:
-            matched_key = None
-            matched_cid = None
-            # متن دقیقاً برابر کلید
-            if q in mapping:
-                matched_key, matched_cid = q, int(mapping[q])
-            else:
-                for k, v in sorted(mapping.items(), key=lambda x: -len(str(x[0]))):
-                    if k and k in q and len(q) <= len(k) + 4:
-                        matched_key, matched_cid = k, int(v)
-                        break
-            if matched_cid:
-                ph = matched_key if matched_key else "⭐"
-                # Bot API با entity واقعی
-                _tok = (HELPER_BOT_TOKEN if (HELPER_BOT_ENABLED and HELPER_BOT_TOKEN) else BOT_TOKEN) or BOT_TOKEN
-                utf16_len = max(1, len(ph.encode("utf-16-le")) // 2)
-                payload = {
-                    "inline_query_id": query.id,
-                    "cache_time": 0,
-                    "is_personal": True,
-                    "results": [{
-                        "type": "article",
-                        "id": f"pe{user_id}{matched_cid}"[:64],
-                        "title": f"✦ {ph}",
-                        "description": "ارسال ایموجی پرمیوم",
-                        "input_message_content": {
-                            "message_text": ph,
-                            "entities": [{
-                                "type": "custom_emoji",
-                                "offset": 0,
-                                "length": utf16_len,
-                                "custom_emoji_id": str(matched_cid),
-                            }],
-                        },
-                    }],
-                }
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
-                            f"https://api.telegram.org/bot{_tok}/answerInlineQuery",
-                            json=payload,
-                            timeout=aiohttp.ClientTimeout(total=6),
-                        ) as resp:
-                            data = await resp.json()
-                            if data.get("ok"):
-                                logging.info("inline plain-emoji ok uid=%s key=%r cid=%s", user_id, ph, matched_cid)
-                                return
-                            logging.warning("inline plain-emoji api: %s", data)
-                except Exception as e:
-                    logging.warning("inline plain-emoji: %s", e)
-                # fallback pyrogram
-                try:
-                    from pyrogram.enums import MessageEntityType as _MET
-                    ents = [MessageEntity(type=_MET.CUSTOM_EMOJI, offset=0, length=utf16_len, custom_emoji_id=int(matched_cid))]
-                    await query.answer(
-                        results=[
-                            InlineQueryResultArticle(
-                                id=f"pe{user_id}{matched_cid}"[:64],
-                                title=f"✦ {ph}",
-                                description="ارسال ایموجی پرمیوم",
-                                input_message_content=InputTextMessageContent(ph),
-                            )
-                        ],
-                        cache_time=0,
-                        is_personal=True,
-                    )
-                    return
-                except Exception as e2:
-                    logging.warning("inline plain-emoji pyro: %s", e2)
-    except Exception as e:
-        logging.warning("inline plain map: %s", e)
-
-
-    
-    
     # --- تبدیل مثل pyiuebot: متن [کد] متن ---
     try:
         import re as _re_h
