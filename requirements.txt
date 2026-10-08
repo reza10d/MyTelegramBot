@@ -1,4 +1,4 @@
-kurigram
+Pyrogram
 yt-dlp
 aiohttp
 pydub
@@ -18,4 +18,4 @@ pilmoji
 python-bidi
 ffmpeg
 SpeechRecognition
-
+g4f
